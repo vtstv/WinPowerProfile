@@ -385,14 +385,128 @@ function Restore-WindowsDefaults {
 }
 
 function Export-CurrentSettings {
-    $outFile = "$env:USERPROFILE\Desktop\PowerProfile_Backup_$(Get-Date -f 'yyyyMMdd_HHmmss').pow"
+    $scheme = Get-ActiveScheme
+    $exportDir = "$env:USERPROFILE\Documents\PowerProfiles"
+    
+    # Create directory if it doesn't exist
+    if (-not (Test-Path $exportDir)) {
+        New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
+    }
+    
+    $outFile = "$exportDir\PowerProfile_Backup_$(Get-Date -f 'yyyyMMdd_HHmmss').pow"
     try {
-        powercfg /export $outFile | Out-Null
+        powercfg /export $outFile $scheme.GUID | Out-Null
         Write-Host ("  ✔  Plan exported to:`n     {0}" -f $outFile) -ForegroundColor $C.Good
     } catch {
         Write-Host "  Export failed: $_" -ForegroundColor $C.Bad
     }
     Start-Sleep -Milliseconds 1200
+}
+
+function Import-PowerPlan {
+    $exportDir = "$env:USERPROFILE\Documents\PowerProfiles"
+    
+    Show-Banner
+    Write-Host ""
+    Write-Host "  ── Import Power Plan (.pow) ────────────────────────────────────" -ForegroundColor $C.Header
+    Write-Host ""
+    
+    # Check if directory exists and has .pow files
+    if (Test-Path $exportDir) {
+        $powFiles = @(Get-ChildItem -Path $exportDir -Filter "*.pow" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+        
+        if ($powFiles.Count -gt 0) {
+            Write-Host "  Available power plans in Documents\PowerProfiles:" -ForegroundColor $C.Normal
+            Write-Host ""
+            
+            for ($i = 0; $i -lt $powFiles.Count; $i++) {
+                $file = $powFiles[$i]
+                $date = $file.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                Write-Host ("  [{0}]  {1,-50}  ({2})" -f ($i+1), $file.Name, $date) -ForegroundColor $C.Normal
+            }
+            Write-Host ""
+            Write-Host "  [C]  Choose custom file path" -ForegroundColor $C.Dim
+            Write-Host "  [B]  Back to main menu" -ForegroundColor $C.Dim
+            Write-Host ""
+            
+            $choice = Read-Host "  Select file to import"
+            
+            if ($choice -match '^\d+$') {
+                $index = [int]$choice - 1
+                if ($index -ge 0 -and $index -lt $powFiles.Count) {
+                    $selectedFile = $powFiles[$index].FullName
+                    Import-PowerPlanFile $selectedFile
+                } else {
+                    Write-Host "  Invalid selection." -ForegroundColor $C.Warn
+                    Start-Sleep -Milliseconds 800
+                }
+            } elseif ($choice -eq 'C') {
+                $customPath = Read-Host "  Enter full path to .pow file"
+                if (Test-Path $customPath) {
+                    Import-PowerPlanFile $customPath
+                } else {
+                    Write-Host "  File not found." -ForegroundColor $C.Bad
+                    Start-Sleep -Milliseconds 800
+                }
+            }
+        } else {
+            Write-Host "  No .pow files found in Documents\PowerProfiles." -ForegroundColor $C.Warn
+            Write-Host ""
+            $customPath = Read-Host "  Enter full path to .pow file (or press Enter to cancel)"
+            if ($customPath -and (Test-Path $customPath)) {
+                Import-PowerPlanFile $customPath
+            } else {
+                Write-Host "  Import cancelled." -ForegroundColor $C.Dim
+                Start-Sleep -Milliseconds 800
+            }
+        }
+    } else {
+        Write-Host "  Documents\PowerProfiles folder not found." -ForegroundColor $C.Warn
+        Write-Host ""
+        $customPath = Read-Host "  Enter full path to .pow file (or press Enter to cancel)"
+        if ($customPath -and (Test-Path $customPath)) {
+            Import-PowerPlanFile $customPath
+        } else {
+            Write-Host "  Import cancelled." -ForegroundColor $C.Dim
+            Start-Sleep -Milliseconds 800
+        }
+    }
+}
+
+function Import-PowerPlanFile {
+    param([string]$FilePath)
+    
+    Write-Host ""
+    Write-Host "  Importing power plan from:" -ForegroundColor $C.Accent
+    Write-Host ("  {0}" -f $FilePath) -ForegroundColor $C.Dim
+    Write-Host ""
+    
+    try {
+        # Import the power plan
+        $output = powercfg /import $FilePath 2>&1
+        
+        # Extract the GUID from the output
+        if ($output -match 'GUID:\s+([\w-]+)') {
+            $newGuid = $Matches[1]
+            Write-Host "  ✔  Power plan imported successfully." -ForegroundColor $C.Good
+            Write-Host ("     GUID: {0}" -f $newGuid) -ForegroundColor $C.Dim
+            Write-Host ""
+            
+            $activate = Read-Host "  Activate this plan now? (Y/N)"
+            if ($activate -eq 'Y' -or $activate -eq 'y') {
+                powercfg /setactive $newGuid | Out-Null
+                Write-Host "  ✔  Power plan activated." -ForegroundColor $C.Good
+            } else {
+                Write-Host "  Plan imported but not activated. Use Windows Power Options to activate it." -ForegroundColor $C.Dim
+            }
+        } else {
+            Write-Host "  ✔  Power plan imported (GUID not detected in output)." -ForegroundColor $C.Good
+        }
+    } catch {
+        Write-Host "  Import failed: $_" -ForegroundColor $C.Bad
+    }
+    
+    Start-Sleep -Milliseconds 1500
 }
 
 function Show-MainMenu {
@@ -407,7 +521,8 @@ function Show-MainMenu {
     Write-Host "  [6]  USB Selective Suspend"                                              -ForegroundColor $C.Normal
     Write-Host "  ─────────────────────────────────────────────────────────────────" -ForegroundColor $C.Dim
     Write-Host "  [R]  Restore Windows Balanced Defaults"                                  -ForegroundColor $C.Warn
-    Write-Host "  [E]  Export current power plan to Desktop (.pow)"                        -ForegroundColor $C.Dim
+    Write-Host "  [E]  Export current power plan (Documents\PowerProfiles)"                -ForegroundColor $C.Dim
+    Write-Host "  [I]  Import power plan from .pow file"                                   -ForegroundColor $C.Dim
     Write-Host "  [Q]  Quit"                                                               -ForegroundColor $C.Dim
     Write-Host ""
 }
@@ -428,6 +543,7 @@ while ($true) {
         '6' { Menu-UsbSuspend }
         'R' { Restore-WindowsDefaults }
         'E' { Export-CurrentSettings }
+        'I' { Import-PowerPlan }
         'Q' { Write-Host "`n  Goodbye.`n" -ForegroundColor $C.Dim; exit 0 }
         default { Write-Host "  Invalid option." -ForegroundColor $C.Warn; Start-Sleep -Milliseconds 500 }
     }
