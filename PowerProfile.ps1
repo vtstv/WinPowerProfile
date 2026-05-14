@@ -1,0 +1,434 @@
+﻿# Copyright (c) 2025 Murr (https://github.com/vtstv)
+# Licensed under MIT License
+
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Windows 11 Power Profile Manager — CPU Boost, Thermals & Power Plan Control
+.DESCRIPTION
+    Safe, menu-driven tool to switch between Economy / Balanced / Performance / Turbo
+    presets, and to fine-tune individual power settings. All changes are reversible.
+.NOTES
+    Run as Administrator. Tested on Windows 10 21H2+ and Windows 11.
+    Author  : PowerProfile Manager
+    Version : 1.3.0
+#>
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# ─── Colour palette ────────────────────────────────────────────────────────────
+$C = @{
+    Title   = 'Cyan'
+    Header  = 'Yellow'
+    Good    = 'Green'
+    Warn    = 'DarkYellow'
+    Bad     = 'Red'
+    Dim     = 'DarkGray'
+    Normal  = 'White'
+    Accent  = 'Magenta'
+}
+
+# ─── PERFBOOSTMODE constants ────────────────────────────────────────────────────
+$BOOST = @{
+    Disabled            = 0
+    Enabled             = 1   # Default on AC
+    Aggressive          = 2
+    EfficientEnabled    = 3
+    EfficientAggressive = 4
+    AggressiveAtGuaranteed = 5
+    EfficientAggressiveAtGuaranteed = 6
+}
+
+$BOOST_LABEL = @{
+    0 = 'Disabled             (coolest / lowest power)'
+    1 = 'Enabled              (default AC behaviour)'
+    2 = 'Aggressive           (max performance, most heat)'
+    3 = 'Efficient Enabled    (boost only when efficient)'
+    4 = 'Efficient Aggressive (boost aggressively but efficiently)'
+    5 = 'Aggressive At Guaranteed'
+    6 = 'Efficient Aggressive At Guaranteed'
+}
+
+# ─── Preset definitions ─────────────────────────────────────────────────────────
+# Each preset: [BoostAC, BoostDC, MinCpuAC%, MaxCpuAC%, MinCpuDC%, MaxCpuDC%,
+#               SystemCoolPolicy(0=passive/1=active), MonitorTimeoutAC(min), SleepTimeoutAC(min)]
+$PRESETS = [ordered]@{
+    '1' = @{
+        Name            = 'Economy / Silent'
+        Description     = 'Boost OFF · CPU capped 80 % · passive cooling · best for quiet work, long battery'
+        BoostAC         = $BOOST.Disabled
+        BoostDC         = $BOOST.Disabled
+        MinCpuAC        = 5
+        MaxCpuAC        = 80
+        MinCpuDC        = 5
+        MaxCpuDC        = 60
+        CoolPolicy      = 0   # passive
+        MonitorAC       = 15
+        SleepAC         = 30
+        UsbSelectiveSuspend = 1
+    }
+    '2' = @{
+        Name            = 'Balanced'
+        Description     = 'Boost Efficient · CPU up to 100 % · Windows defaults · everyday use'
+        BoostAC         = $BOOST.EfficientEnabled
+        BoostDC         = $BOOST.EfficientEnabled
+        MinCpuAC        = 5
+        MaxCpuAC        = 100
+        MinCpuDC        = 5
+        MaxCpuDC        = 80
+        CoolPolicy      = 0
+        MonitorAC       = 10
+        SleepAC         = 30
+        UsbSelectiveSuspend = 1
+    }
+    '3' = @{
+        Name            = 'Performance'
+        Description     = 'Boost Aggressive · CPU 100 % · active cooling · great for workloads'
+        BoostAC         = $BOOST.Aggressive
+        BoostDC         = $BOOST.Enabled
+        MinCpuAC        = 20
+        MaxCpuAC        = 100
+        MinCpuDC        = 10
+        MaxCpuDC        = 100
+        CoolPolicy      = 1   # active
+        MonitorAC       = 20
+        SleepAC         = 0   # never
+        UsbSelectiveSuspend = 0
+    }
+    '4' = @{
+        Name            = 'Turbo / Gaming'
+        Description     = 'Boost Efficient-Aggressive · CPU pinned 100 % · active cooling · no sleep'
+        BoostAC         = $BOOST.EfficientAggressive
+        BoostDC         = $BOOST.Aggressive
+        MinCpuAC        = 100
+        MaxCpuAC        = 100
+        MinCpuDC        = 50
+        MaxCpuDC        = 100
+        CoolPolicy      = 1
+        MonitorAC       = 0   # never
+        SleepAC         = 0   # never
+        UsbSelectiveSuspend = 0
+    }
+}
+
+# ─── Helpers ────────────────────────────────────────────────────────────────────
+
+function Require-Admin {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $pr = [Security.Principal.WindowsPrincipal]$id
+    if (-not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Host "`n  [!] This script must be run as Administrator." -ForegroundColor $C.Bad
+        Write-Host "      Right-click PowerShell → 'Run as administrator', then try again.`n" -ForegroundColor $C.Warn
+        exit 1
+    }
+}
+
+function Get-ActiveScheme {
+    $line = powercfg /getactivescheme
+    if ($line -match 'Power Scheme GUID:\s+([\w-]+)\s+\((.+)\)') {
+        return @{ GUID = $Matches[1]; Name = $Matches[2] }
+    }
+    return @{ GUID = ''; Name = 'Unknown' }
+}
+
+function Get-PowerValue {
+    param([string]$Sub, [string]$Setting)
+    try {
+        $raw = powercfg /query scheme_current $Sub $Setting 2>$null
+        $ac  = ($raw | Select-String 'Current AC Power Setting Index').ToString().Trim()
+        $dc  = ($raw | Select-String 'Current DC Power Setting Index').ToString().Trim()
+        if ($ac -match '0x([0-9a-f]+)') { $acVal = [Convert]::ToInt32($Matches[1],16) } else { $acVal = $null }
+        if ($dc -match '0x([0-9a-f]+)') { $dcVal = [Convert]::ToInt32($Matches[1],16) } else { $dcVal = $null }
+        return @{ AC = $acVal; DC = $dcVal }
+    } catch { return @{ AC = $null; DC = $null } }
+}
+
+function Set-PowerValue {
+    param([string]$Sub, [string]$Setting, [int]$AC, [int]$DC)
+    powercfg /setacvalueindex scheme_current $Sub $Setting $AC | Out-Null
+    powercfg /setdcvalueindex scheme_current $Sub $Setting $DC | Out-Null
+}
+
+function Commit-Scheme {
+    powercfg /setactive scheme_current | Out-Null
+}
+
+function Show-Banner {
+    Clear-Host
+    $banner = @"
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║     Windows 11  ·  Power Profile Manager  v1.3  ·  By Murr   ║
+  ╚══════════════════════════════════════════════════════════════╝
+"@
+    Write-Host $banner -ForegroundColor $C.Title
+}
+
+function Show-CurrentStatus {
+    $scheme = Get-ActiveScheme
+    $boost  = Get-PowerValue 'sub_processor' 'PERFBOOSTMODE'
+    $minAC  = Get-PowerValue 'sub_processor' 'PROCTHROTTLEMIN'
+    $maxAC  = Get-PowerValue 'sub_processor' 'PROCTHROTTLEMAX'
+    $cool   = Get-PowerValue 'sub_processor' 'SYSCOOLPOL'
+    $usb    = Get-PowerValue 'sub_sleep'     '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'
+
+    Write-Host "  ── Current Status ──────────────────────────────────────────────" -ForegroundColor $C.Header
+    Write-Host ("  Active plan  : {0}  [{1}]" -f $scheme.Name, $scheme.GUID) -ForegroundColor $C.Normal
+
+    $boostAcLabel = if ($null -ne $boost.AC -and $BOOST_LABEL.ContainsKey($boost.AC)) { $BOOST_LABEL[$boost.AC] } else { "n/a" }
+    $boostDcLabel = if ($null -ne $boost.DC -and $BOOST_LABEL.ContainsKey($boost.DC)) { $BOOST_LABEL[$boost.DC] } else { "n/a" }
+
+    $boostColor = if ($boost.AC -eq 0) { $C.Warn } elseif ($boost.AC -ge 2) { $C.Good } else { $C.Normal }
+    Write-Host ("  CPU Boost AC : {0}"   -f $boostAcLabel) -ForegroundColor $boostColor
+    Write-Host ("  CPU Boost DC : {0}"   -f $boostDcLabel) -ForegroundColor $C.Dim
+    Write-Host ("  CPU Min  AC  : {0} %  |  DC: {1} %" -f $minAC.AC, $minAC.DC) -ForegroundColor $C.Normal
+    Write-Host ("  CPU Max  AC  : {0} %  |  DC: {1} %" -f $maxAC.AC, $maxAC.DC) -ForegroundColor $C.Normal
+
+    $coolLabel = if ($cool.AC -eq 1) { 'Active (fan-first)' } elseif ($cool.AC -eq 0) { 'Passive (throttle-first)' } else { 'n/a' }
+    Write-Host ("  Cooling Mode : {0}"   -f $coolLabel) -ForegroundColor $C.Normal
+
+    $usbLabel = if ($usb.AC -eq 0) { 'Disabled (always on)' } elseif ($usb.AC -eq 1) { 'Enabled (power saving)' } else { 'n/a' }
+    Write-Host ("  USB Suspend  : {0}"   -f $usbLabel) -ForegroundColor $C.Dim
+    Write-Host ""
+}
+
+function Apply-Preset {
+    param([hashtable]$P)
+
+    Write-Host ("`n  Applying preset: {0} …" -f $P.Name) -ForegroundColor $C.Accent
+
+    # CPU Boost
+    Set-PowerValue 'sub_processor' 'PERFBOOSTMODE'   $P.BoostAC  $P.BoostDC
+
+    # CPU throttle min/max
+    Set-PowerValue 'sub_processor' 'PROCTHROTTLEMIN' $P.MinCpuAC $P.MinCpuDC
+    Set-PowerValue 'sub_processor' 'PROCTHROTTLEMAX' $P.MaxCpuAC $P.MaxCpuDC
+
+    # Cooling policy
+    Set-PowerValue 'sub_processor' 'SYSCOOLPOL'      $P.CoolPolicy $P.CoolPolicy
+
+    # Monitor timeout (0 = never)
+    Set-PowerValue 'sub_video' '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e' ($P.MonitorAC * 60) ($P.MonitorAC * 60)
+
+    # Sleep timeout (0 = never)
+    Set-PowerValue 'sub_sleep' '29f6c1db-86da-48c5-9fdb-f2b67b1f44da' ($P.SleepAC * 60) ($P.SleepAC * 60)
+
+    # USB Selective Suspend
+    Set-PowerValue 'sub_sleep' '48e6b7a6-50f5-4782-a5d4-53bb8f07e226' $P.UsbSelectiveSuspend $P.UsbSelectiveSuspend
+
+    Commit-Scheme
+
+    Write-Host ("  ✔  {0} applied successfully." -f $P.Name) -ForegroundColor $C.Good
+    Start-Sleep -Milliseconds 800
+}
+
+function Menu-Presets {
+    Show-Banner
+    Show-CurrentStatus
+    Write-Host "  ── Quick Presets ───────────────────────────────────────────────" -ForegroundColor $C.Header
+    foreach ($key in $PRESETS.Keys) {
+        $p = $PRESETS[$key]
+        Write-Host ("  [{0}]  {1,-22}  {2}" -f $key, $p.Name, $p.Description) -ForegroundColor $C.Normal
+    }
+    Write-Host "  [B]  Back to main menu" -ForegroundColor $C.Dim
+    Write-Host ""
+    $choice = Read-Host "  Select preset"
+    if ($PRESETS.Contains($choice)) {
+        Apply-Preset $PRESETS[$choice]
+    }
+}
+
+function Menu-BoostOnly {
+    Show-Banner
+    Show-CurrentStatus
+    Write-Host "  ── CPU Boost Mode (AC) ─────────────────────────────────────────" -ForegroundColor $C.Header
+    foreach ($k in ($BOOST_LABEL.Keys | Sort-Object)) {
+        Write-Host ("  [{0}]  {1}" -f $k, $BOOST_LABEL[$k]) -ForegroundColor $C.Normal
+    }
+    Write-Host "  [B]  Back" -ForegroundColor $C.Dim
+    Write-Host ""
+    $choice = Read-Host "  Select boost mode"
+    if ($choice -match '^\d+$' -and $BOOST_LABEL.ContainsKey([int]$choice)) {
+        $val = [int]$choice
+        # Same value for DC unless it's Aggressive — protect battery
+        $dcVal = if ($val -ge 2) { [math]::Min($val, $BOOST.Enabled) } else { $val }
+        Set-PowerValue 'sub_processor' 'PERFBOOSTMODE' $val $dcVal
+        Commit-Scheme
+        Write-Host ("  ✔  Boost set to: {0}" -f $BOOST_LABEL[$val]) -ForegroundColor $C.Good
+        Start-Sleep -Milliseconds 800
+    }
+}
+
+function Menu-CpuLimits {
+    Show-Banner
+    Show-CurrentStatus
+    Write-Host "  ── CPU Frequency Limits (AC) ───────────────────────────────────" -ForegroundColor $C.Header
+    Write-Host "  Useful to cap heat/noise without changing the full preset." -ForegroundColor $C.Dim
+    Write-Host ""
+
+    $minRaw = Read-Host "  Minimum CPU % (5–100, Enter to skip)"
+    $maxRaw = Read-Host "  Maximum CPU % (5–100, Enter to skip)"
+
+    $changed = $false
+    if ($minRaw -match '^\d+$') {
+        $min = [math]::Clamp([int]$minRaw, 5, 100)
+        Set-PowerValue 'sub_processor' 'PROCTHROTTLEMIN' $min $min
+        $changed = $true
+    }
+    if ($maxRaw -match '^\d+$') {
+        $max = [math]::Clamp([int]$maxRaw, 5, 100)
+        Set-PowerValue 'sub_processor' 'PROCTHROTTLEMAX' $max $max
+        $changed = $true
+    }
+    if ($changed) {
+        Commit-Scheme
+        Write-Host "  ✔  CPU limits updated." -ForegroundColor $C.Good
+    } else {
+        Write-Host "  No changes made." -ForegroundColor $C.Dim
+    }
+    Start-Sleep -Milliseconds 800
+}
+
+function Menu-CoolingPolicy {
+    Show-Banner
+    Show-CurrentStatus
+    Write-Host "  ── System Cooling Policy ───────────────────────────────────────" -ForegroundColor $C.Header
+    Write-Host "  [0]  Passive — throttle CPU first, then spin fans (quieter)"    -ForegroundColor $C.Normal
+    Write-Host "  [1]  Active  — spin fans first, throttle later (cooler CPU)"    -ForegroundColor $C.Normal
+    Write-Host "  [B]  Back"                                                       -ForegroundColor $C.Dim
+    Write-Host ""
+    $choice = Read-Host "  Select"
+    if ($choice -in '0','1') {
+        Set-PowerValue 'sub_processor' 'SYSCOOLPOL' ([int]$choice) ([int]$choice)
+        Commit-Scheme
+        $label = if ($choice -eq '1') { 'Active' } else { 'Passive' }
+        Write-Host ("  ✔  Cooling policy set to: {0}" -f $label) -ForegroundColor $C.Good
+        Start-Sleep -Milliseconds 800
+    }
+}
+
+function Menu-SleepDisplay {
+    Show-Banner
+    Show-CurrentStatus
+    Write-Host "  ── Monitor & Sleep Timeouts (AC) ───────────────────────────────" -ForegroundColor $C.Header
+    Write-Host "  Enter 0 to disable (never sleep / never turn off display)." -ForegroundColor $C.Dim
+    Write-Host ""
+
+    $monRaw   = Read-Host "  Monitor off after  (minutes, Enter to skip)"
+    $sleepRaw = Read-Host "  System sleep after (minutes, Enter to skip)"
+
+    $changed = $false
+    if ($monRaw -match '^\d+$') {
+        $sec = [int]$monRaw * 60
+        Set-PowerValue 'sub_video' '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e' $sec $sec
+        $changed = $true
+    }
+    if ($sleepRaw -match '^\d+$') {
+        $sec = [int]$sleepRaw * 60
+        Set-PowerValue 'sub_sleep' '29f6c1db-86da-48c5-9fdb-f2b67b1f44da' $sec $sec
+        $changed = $true
+    }
+    if ($changed) {
+        Commit-Scheme
+        Write-Host "  ✔  Timeouts updated." -ForegroundColor $C.Good
+    } else {
+        Write-Host "  No changes made." -ForegroundColor $C.Dim
+    }
+    Start-Sleep -Milliseconds 800
+}
+
+function Menu-UsbSuspend {
+    Show-Banner
+    Show-CurrentStatus
+    Write-Host "  ── USB Selective Suspend ───────────────────────────────────────" -ForegroundColor $C.Header
+    Write-Host "  [0]  Disabled — USB devices always powered (gaming/audio gear)"  -ForegroundColor $C.Normal
+    Write-Host "  [1]  Enabled  — Windows may suspend idle USB ports (save power)" -ForegroundColor $C.Normal
+    Write-Host "  [B]  Back"                                                        -ForegroundColor $C.Dim
+    Write-Host ""
+    $choice = Read-Host "  Select"
+    if ($choice -in '0','1') {
+        # USB Selective Suspend GUID
+        Set-PowerValue 'sub_sleep' '48e6b7a6-50f5-4782-a5d4-53bb8f07e226' ([int]$choice) ([int]$choice)
+        Commit-Scheme
+        $label = if ($choice -eq '0') { 'Disabled' } else { 'Enabled' }
+        Write-Host ("  ✔  USB Selective Suspend: {0}" -f $label) -ForegroundColor $C.Good
+        Start-Sleep -Milliseconds 800
+    }
+}
+
+function Restore-WindowsDefaults {
+    Show-Banner
+    Write-Host ""
+    Write-Host "  This will restore the 'Balanced' Windows defaults on the active scheme." -ForegroundColor $C.Warn
+    $confirm = Read-Host "  Type YES to confirm"
+    if ($confirm -eq 'YES') {
+        # Boost: Enabled on AC, Enabled on DC
+        Set-PowerValue 'sub_processor' 'PERFBOOSTMODE'   1   1
+        # CPU min/max defaults
+        Set-PowerValue 'sub_processor' 'PROCTHROTTLEMIN' 5   5
+        Set-PowerValue 'sub_processor' 'PROCTHROTTLEMAX' 100 100
+        # Cooling: passive
+        Set-PowerValue 'sub_processor' 'SYSCOOLPOL'      0   0
+        # Monitor: 10 min AC, 5 min DC
+        Set-PowerValue 'sub_video' '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e' 600 300
+        # Sleep: 30 min AC, 15 min DC
+        Set-PowerValue 'sub_sleep' '29f6c1db-86da-48c5-9fdb-f2b67b1f44da' 1800 900
+        # USB suspend: enabled
+        Set-PowerValue 'sub_sleep' '48e6b7a6-50f5-4782-a5d4-53bb8f07e226' 1 1
+        Commit-Scheme
+        Write-Host "  ✔  Windows defaults restored." -ForegroundColor $C.Good
+    } else {
+        Write-Host "  Cancelled." -ForegroundColor $C.Dim
+    }
+    Start-Sleep -Milliseconds 800
+}
+
+function Export-CurrentSettings {
+    $outFile = "$env:USERPROFILE\Desktop\PowerProfile_Backup_$(Get-Date -f 'yyyyMMdd_HHmmss').pow"
+    try {
+        powercfg /export $outFile | Out-Null
+        Write-Host ("  ✔  Plan exported to:`n     {0}" -f $outFile) -ForegroundColor $C.Good
+    } catch {
+        Write-Host "  Export failed: $_" -ForegroundColor $C.Bad
+    }
+    Start-Sleep -Milliseconds 1200
+}
+
+function Show-MainMenu {
+    Show-Banner
+    Show-CurrentStatus
+    Write-Host "  ── Main Menu ───────────────────────────────────────────────────" -ForegroundColor $C.Header
+    Write-Host "  [1]  Apply Quick Preset      (Economy / Balanced / Performance / Turbo)" -ForegroundColor $C.Normal
+    Write-Host "  [2]  Change CPU Boost Mode   (fine-grained boost control)"               -ForegroundColor $C.Normal
+    Write-Host "  [3]  Set CPU Frequency Limits (min / max %)"                             -ForegroundColor $C.Normal
+    Write-Host "  [4]  Cooling Policy          (passive / active)"                         -ForegroundColor $C.Normal
+    Write-Host "  [5]  Monitor & Sleep Timeouts"                                           -ForegroundColor $C.Normal
+    Write-Host "  [6]  USB Selective Suspend"                                              -ForegroundColor $C.Normal
+    Write-Host "  ─────────────────────────────────────────────────────────────────" -ForegroundColor $C.Dim
+    Write-Host "  [R]  Restore Windows Balanced Defaults"                                  -ForegroundColor $C.Warn
+    Write-Host "  [E]  Export current power plan to Desktop (.pow)"                        -ForegroundColor $C.Dim
+    Write-Host "  [Q]  Quit"                                                               -ForegroundColor $C.Dim
+    Write-Host ""
+}
+
+# ─── Entry point ────────────────────────────────────────────────────────────────
+
+Require-Admin
+
+while ($true) {
+    Show-MainMenu
+    $choice = (Read-Host "  Select option").Trim().ToUpper()
+    switch ($choice) {
+        '1' { Menu-Presets }
+        '2' { Menu-BoostOnly }
+        '3' { Menu-CpuLimits }
+        '4' { Menu-CoolingPolicy }
+        '5' { Menu-SleepDisplay }
+        '6' { Menu-UsbSuspend }
+        'R' { Restore-WindowsDefaults }
+        'E' { Export-CurrentSettings }
+        'Q' { Write-Host "`n  Goodbye.`n" -ForegroundColor $C.Dim; exit 0 }
+        default { Write-Host "  Invalid option." -ForegroundColor $C.Warn; Start-Sleep -Milliseconds 500 }
+    }
+}
