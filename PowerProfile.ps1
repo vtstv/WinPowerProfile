@@ -8,11 +8,24 @@
 .DESCRIPTION
     Safe, menu-driven tool to switch between Economy / Balanced / Performance / Turbo
     presets, and to fine-tune individual power settings. All changes are reversible.
+.PARAMETER Toggle
+    Toggle between Economy and Balanced presets without showing the menu.
 .NOTES
     Run as Administrator. Tested on Windows 10 21H2+ and Windows 11.
     Author  : PowerProfile Manager
     Version : 1.3.0
+.EXAMPLE
+    PowerProfile.ps1
+    Run interactive menu
+.EXAMPLE
+    PowerProfile.ps1 -Toggle
+    Toggle between Economy and Balanced modes
 #>
+
+param(
+    [Parameter(Position=0)]
+    [switch]$Toggle
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -136,18 +149,33 @@ function Get-PowerValue {
     param([string]$Sub, [string]$Setting)
     try {
         $raw = powercfg /query scheme_current $Sub $Setting 2>$null
-        $ac  = ($raw | Select-String 'Current AC Power Setting Index').ToString().Trim()
-        $dc  = ($raw | Select-String 'Current DC Power Setting Index').ToString().Trim()
-        if ($ac -match '0x([0-9a-f]+)') { $acVal = [Convert]::ToInt32($Matches[1],16) } else { $acVal = $null }
-        if ($dc -match '0x([0-9a-f]+)') { $dcVal = [Convert]::ToInt32($Matches[1],16) } else { $dcVal = $null }
+        $acLine = $raw | Where-Object { $_ -match 'Current AC Power Setting Index' }
+        $dcLine = $raw | Where-Object { $_ -match 'Current DC Power Setting Index' }
+        
+        $acVal = $null
+        $dcVal = $null
+        
+        if ($acLine -and $acLine -match '0x([0-9a-f]+)') { 
+            $acVal = [Convert]::ToInt32($Matches[1], 16) 
+        }
+        if ($dcLine -and $dcLine -match '0x([0-9a-f]+)') { 
+            $dcVal = [Convert]::ToInt32($Matches[1], 16) 
+        }
+        
         return @{ AC = $acVal; DC = $dcVal }
-    } catch { return @{ AC = $null; DC = $null } }
+    } catch { 
+        return @{ AC = $null; DC = $null } 
+    }
 }
 
 function Set-PowerValue {
     param([string]$Sub, [string]$Setting, [int]$AC, [int]$DC)
-    powercfg /setacvalueindex scheme_current $Sub $Setting $AC | Out-Null
-    powercfg /setdcvalueindex scheme_current $Sub $Setting $DC | Out-Null
+    try {
+        powercfg /setacvalueindex scheme_current $Sub $Setting $AC 2>&1 | Out-Null
+        powercfg /setdcvalueindex scheme_current $Sub $Setting $DC 2>&1 | Out-Null
+    } catch {
+        # Silently ignore if setting doesn't exist on this system
+    }
 }
 
 function Commit-Scheme {
@@ -194,9 +222,11 @@ function Show-CurrentStatus {
 }
 
 function Apply-Preset {
-    param([hashtable]$P)
+    param([hashtable]$P, [switch]$Silent)
 
-    Write-Host ("`n  Applying preset: {0} …" -f $P.Name) -ForegroundColor $C.Accent
+    if (-not $Silent) {
+        Write-Host ("`n  Applying preset: {0} …" -f $P.Name) -ForegroundColor $C.Accent
+    }
 
     # CPU Boost
     Set-PowerValue 'sub_processor' 'PERFBOOSTMODE'   $P.BoostAC  $P.BoostDC
@@ -219,8 +249,10 @@ function Apply-Preset {
 
     Commit-Scheme
 
-    Write-Host ("  ✔  {0} applied successfully." -f $P.Name) -ForegroundColor $C.Good
-    Start-Sleep -Milliseconds 800
+    if (-not $Silent) {
+        Write-Host ("  ✔  {0} applied successfully." -f $P.Name) -ForegroundColor $C.Good
+        Start-Sleep -Milliseconds 800
+    }
 }
 
 function Menu-Presets {
@@ -235,7 +267,7 @@ function Menu-Presets {
     Write-Host ""
     $choice = Read-Host "  Select preset"
     if ($PRESETS.Contains($choice)) {
-        Apply-Preset $PRESETS[$choice]
+        Apply-Preset -P $PRESETS[$choice]
     }
 }
 
@@ -527,24 +559,94 @@ function Show-MainMenu {
     Write-Host ""
 }
 
+function Detect-CurrentPreset {
+    <#
+    .SYNOPSIS
+        Attempts to detect which preset is currently active based on power settings.
+    .DESCRIPTION
+        Compares current power settings with preset definitions to identify the active preset.
+        Returns '1' for Economy or '2' for Balanced if detected, otherwise returns $null.
+    #>
+    
+    $maxAC  = Get-PowerValue 'sub_processor' 'PROCTHROTTLEMAX'
+    $minAC  = Get-PowerValue 'sub_processor' 'PROCTHROTTLEMIN'
+    
+    # Detect based on CPU limits (PERFBOOSTMODE may not be available on all systems)
+    if ($maxAC.AC -eq 80 -and $minAC.AC -eq 5) { 
+        return '1'  # Economy
+    }
+    
+    if ($maxAC.AC -eq 100 -and $minAC.AC -eq 5) { 
+        return '2'  # Balanced
+    }
+    
+    # Fallback: if max CPU is 80% or less, assume Economy
+    if ($maxAC.AC -le 80) { 
+        return '1'
+    }
+    
+    # Default to Balanced if uncertain
+    return '2'
+}
+
+function Switch-EconomyBalanced {
+    <#
+    .SYNOPSIS
+        Toggle between Economy and Balanced presets.
+    #>
+    
+    $current = Detect-CurrentPreset
+    
+    if ($current -eq '1') {
+        # Currently Economy, switch to Balanced
+        $target = $PRESETS['2']
+        Write-Host "`n  Switching from Economy to Balanced..." -ForegroundColor $C.Accent
+    } else {
+        # Currently Balanced (or other), switch to Economy
+        $target = $PRESETS['1']
+        Write-Host "`n  Switching from Balanced to Economy..." -ForegroundColor $C.Accent
+    }
+    
+    Apply-Preset -P $target -Silent
+    
+    Write-Host ("  ✔  Switched to: {0}" -f $target.Name) -ForegroundColor $C.Good
+    Write-Host ""
+    
+    Start-Sleep -Milliseconds 1500
+}
+
 # ─── Entry point ────────────────────────────────────────────────────────────────
 
 Require-Admin
 
+# Check for toggle mode via flag file or parameter
+$toggleFlagFile = "$env:TEMP\PowerProfile_ToggleMode.flag"
+$shouldToggle = $Toggle -or (Test-Path $toggleFlagFile)
+
+if ($shouldToggle) {
+    # Remove flag file if it exists
+    if (Test-Path $toggleFlagFile) {
+        Remove-Item $toggleFlagFile -Force -ErrorAction SilentlyContinue
+    }
+    
+    Switch-EconomyBalanced
+    exit 0
+}
+
 while ($true) {
     Show-MainMenu
     $choice = (Read-Host "  Select option").Trim().ToUpper()
-    switch ($choice) {
-        '1' { Menu-Presets }
-        '2' { Menu-BoostOnly }
-        '3' { Menu-CpuLimits }
-        '4' { Menu-CoolingPolicy }
-        '5' { Menu-SleepDisplay }
-        '6' { Menu-UsbSuspend }
-        'R' { Restore-WindowsDefaults }
-        'E' { Export-CurrentSettings }
-        'I' { Import-PowerPlan }
-        'Q' { Write-Host "`n  Goodbye.`n" -ForegroundColor $C.Dim; exit 0 }
-        default { Write-Host "  Invalid option." -ForegroundColor $C.Warn; Start-Sleep -Milliseconds 500 }
-    }
+    
+    # Process menu choice
+    if ($choice -eq '1') { Menu-Presets }
+    elseif ($choice -eq '2') { Menu-BoostOnly }
+    elseif ($choice -eq '3') { Menu-CpuLimits }
+    elseif ($choice -eq '4') { Menu-CoolingPolicy }
+    elseif ($choice -eq '5') { Menu-SleepDisplay }
+    elseif ($choice -eq '6') { Menu-UsbSuspend }
+    elseif ($choice -eq 'R') { Restore-WindowsDefaults }
+    elseif ($choice -eq 'E') { Export-CurrentSettings }
+    elseif ($choice -eq 'I') { Import-PowerPlan }
+    elseif ($choice -eq 'Q') { Write-Host "`n  Goodbye.`n" -ForegroundColor $C.Dim; exit 0 }
+    else { Write-Host "  Invalid option." -ForegroundColor $C.Warn; Start-Sleep -Milliseconds 500 }
 }
