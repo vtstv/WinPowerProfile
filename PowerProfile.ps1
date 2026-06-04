@@ -69,7 +69,7 @@ $BOOST_LABEL = @{
 $PRESETS = [ordered]@{
     '1' = @{
         Name            = 'Economy / Silent'
-        Description     = 'Boost OFF · CPU capped 80 % · passive cooling · best for quiet work, long battery'
+        Description     = 'Boost OFF · CPU capped 80% · passive · coolest & quietest'
         BoostAC         = $BOOST.Disabled
         BoostDC         = $BOOST.Disabled
         MinCpuAC        = 5
@@ -82,22 +82,36 @@ $PRESETS = [ordered]@{
         UsbSelectiveSuspend = 1
     }
     '2' = @{
+        Name            = 'Eco-Balanced'
+        Description     = 'Boost OFF · CPU 100% · active cooling · cool & responsive'
+        BoostAC         = $BOOST.Disabled
+        BoostDC         = $BOOST.Disabled
+        MinCpuAC        = 5
+        MaxCpuAC        = 100
+        MinCpuDC        = 5
+        MaxCpuDC        = 80
+        CoolPolicy      = 1   # active - prevent thermal throttling
+        MonitorAC       = 10
+        SleepAC         = 30
+        UsbSelectiveSuspend = 1
+    }
+    '3' = @{
         Name            = 'Balanced'
-        Description     = 'Boost Efficient · CPU up to 100 % · Windows defaults · everyday use'
+        Description     = 'Boost Efficient · CPU 100% · passive · Windows default'
         BoostAC         = $BOOST.EfficientEnabled
         BoostDC         = $BOOST.EfficientEnabled
         MinCpuAC        = 5
         MaxCpuAC        = 100
         MinCpuDC        = 5
         MaxCpuDC        = 80
-        CoolPolicy      = 0
+        CoolPolicy      = 0   # passive
         MonitorAC       = 10
         SleepAC         = 30
         UsbSelectiveSuspend = 1
     }
-    '3' = @{
+    '4' = @{
         Name            = 'Performance'
-        Description     = 'Boost Aggressive · CPU 100 % · active cooling · great for workloads'
+        Description     = 'Boost Aggressive · CPU 100% · active · great for workloads'
         BoostAC         = $BOOST.Aggressive
         BoostDC         = $BOOST.Enabled
         MinCpuAC        = 20
@@ -109,16 +123,16 @@ $PRESETS = [ordered]@{
         SleepAC         = 0   # never
         UsbSelectiveSuspend = 0
     }
-    '4' = @{
+    '5' = @{
         Name            = 'Turbo / Gaming'
-        Description     = 'Boost Efficient-Aggressive · CPU pinned 100 % · active cooling · no sleep'
+        Description     = 'Boost Efficient-Aggressive · CPU 100% · active · max performance'
         BoostAC         = $BOOST.EfficientAggressive
         BoostDC         = $BOOST.Aggressive
         MinCpuAC        = 100
         MaxCpuAC        = 100
         MinCpuDC        = 50
         MaxCpuDC        = 100
-        CoolPolicy      = 1
+        CoolPolicy      = 1   # active
         MonitorAC       = 0   # never
         SleepAC         = 0   # never
         UsbSelectiveSuspend = 0
@@ -290,36 +304,6 @@ function Menu-BoostOnly {
         Write-Host ("  ✔  Boost set to: {0}" -f $BOOST_LABEL[$val]) -ForegroundColor $C.Good
         Start-Sleep -Milliseconds 800
     }
-}
-
-function Menu-CpuLimits {
-    Show-Banner
-    Show-CurrentStatus
-    Write-Host "  ── CPU Frequency Limits (AC) ───────────────────────────────────" -ForegroundColor $C.Header
-    Write-Host "  Useful to cap heat/noise without changing the full preset." -ForegroundColor $C.Dim
-    Write-Host ""
-
-    $minRaw = Read-Host "  Minimum CPU % (5–100, Enter to skip)"
-    $maxRaw = Read-Host "  Maximum CPU % (5–100, Enter to skip)"
-
-    $changed = $false
-    if ($minRaw -match '^\d+$') {
-        $min = [math]::Clamp([int]$minRaw, 5, 100)
-        Set-PowerValue 'sub_processor' 'PROCTHROTTLEMIN' $min $min
-        $changed = $true
-    }
-    if ($maxRaw -match '^\d+$') {
-        $max = [math]::Clamp([int]$maxRaw, 5, 100)
-        Set-PowerValue 'sub_processor' 'PROCTHROTTLEMAX' $max $max
-        $changed = $true
-    }
-    if ($changed) {
-        Commit-Scheme
-        Write-Host "  ✔  CPU limits updated." -ForegroundColor $C.Good
-    } else {
-        Write-Host "  No changes made." -ForegroundColor $C.Dim
-    }
-    Start-Sleep -Milliseconds 800
 }
 
 function Menu-CoolingPolicy {
@@ -545,12 +529,11 @@ function Show-MainMenu {
     Show-Banner
     Show-CurrentStatus
     Write-Host "  ── Main Menu ───────────────────────────────────────────────────" -ForegroundColor $C.Header
-    Write-Host "  [1]  Apply Quick Preset      (Economy / Balanced / Performance / Turbo)" -ForegroundColor $C.Normal
+    Write-Host "  [1]  Apply Quick Preset      (Economy / Eco-Balanced / Balanced / Performance / Turbo)" -ForegroundColor $C.Normal
     Write-Host "  [2]  Change CPU Boost Mode   (fine-grained boost control)"               -ForegroundColor $C.Normal
-    Write-Host "  [3]  Set CPU Frequency Limits (min / max %)"                             -ForegroundColor $C.Normal
-    Write-Host "  [4]  Cooling Policy          (passive / active)"                         -ForegroundColor $C.Normal
-    Write-Host "  [5]  Monitor & Sleep Timeouts"                                           -ForegroundColor $C.Normal
-    Write-Host "  [6]  USB Selective Suspend"                                              -ForegroundColor $C.Normal
+    Write-Host "  [3]  Cooling Policy          (passive / active)"                         -ForegroundColor $C.Normal
+    Write-Host "  [4]  Monitor & Sleep Timeouts"                                           -ForegroundColor $C.Normal
+    Write-Host "  [5]  USB Selective Suspend"                                              -ForegroundColor $C.Normal
     Write-Host "  ─────────────────────────────────────────────────────────────────" -ForegroundColor $C.Dim
     Write-Host "  [R]  Restore Windows Balanced Defaults"                                  -ForegroundColor $C.Warn
     Write-Host "  [E]  Export current power plan (Documents\PowerProfiles)"                -ForegroundColor $C.Dim
@@ -565,7 +548,7 @@ function Detect-CurrentPreset {
         Attempts to detect which preset is currently active based on power settings.
     .DESCRIPTION
         Compares current power settings with preset definitions to identify the active preset.
-        Returns '1' for Economy or '2' for Balanced if detected, otherwise returns $null.
+        Returns '1' for Economy, '2' for Eco-Balanced, '3' for Balanced, etc.
     #>
     
     $maxAC  = Get-PowerValue 'sub_processor' 'PROCTHROTTLEMAX'
@@ -577,7 +560,7 @@ function Detect-CurrentPreset {
     }
     
     if ($maxAC.AC -eq 100 -and $minAC.AC -eq 5) { 
-        return '2'  # Balanced
+        return '2'  # Eco-Balanced (or any 100% mode)
     }
     
     # Fallback: if max CPU is 80% or less, assume Economy
@@ -585,26 +568,26 @@ function Detect-CurrentPreset {
         return '1'
     }
     
-    # Default to Balanced if uncertain
+    # Default to Eco-Balanced if uncertain
     return '2'
 }
 
 function Switch-EconomyBalanced {
     <#
     .SYNOPSIS
-        Toggle between Economy and Balanced presets.
+        Toggle between Economy and Eco-Balanced presets.
     #>
     
     $current = Detect-CurrentPreset
     
     if ($current -eq '1') {
-        # Currently Economy, switch to Balanced
+        # Currently Economy, switch to Eco-Balanced
         $target = $PRESETS['2']
-        Write-Host "`n  Switching from Economy to Balanced..." -ForegroundColor $C.Accent
+        Write-Host "`n  Switching from Economy to Eco-Balanced..." -ForegroundColor $C.Accent
     } else {
-        # Currently Balanced (or other), switch to Economy
+        # Currently Eco-Balanced (or other), switch to Economy
         $target = $PRESETS['1']
-        Write-Host "`n  Switching from Balanced to Economy..." -ForegroundColor $C.Accent
+        Write-Host "`n  Switching from Eco-Balanced to Economy..." -ForegroundColor $C.Accent
     }
     
     Apply-Preset -P $target -Silent
@@ -640,10 +623,9 @@ while ($true) {
     # Process menu choice
     if ($choice -eq '1') { Menu-Presets }
     elseif ($choice -eq '2') { Menu-BoostOnly }
-    elseif ($choice -eq '3') { Menu-CpuLimits }
-    elseif ($choice -eq '4') { Menu-CoolingPolicy }
-    elseif ($choice -eq '5') { Menu-SleepDisplay }
-    elseif ($choice -eq '6') { Menu-UsbSuspend }
+    elseif ($choice -eq '3') { Menu-CoolingPolicy }
+    elseif ($choice -eq '4') { Menu-SleepDisplay }
+    elseif ($choice -eq '5') { Menu-UsbSuspend }
     elseif ($choice -eq 'R') { Restore-WindowsDefaults }
     elseif ($choice -eq 'E') { Export-CurrentSettings }
     elseif ($choice -eq 'I') { Import-PowerPlan }
