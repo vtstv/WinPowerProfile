@@ -554,13 +554,17 @@ function Detect-CurrentPreset {
     $maxAC  = Get-PowerValue 'sub_processor' 'PROCTHROTTLEMAX'
     $minAC  = Get-PowerValue 'sub_processor' 'PROCTHROTTLEMIN'
     
-    # Detect based on CPU limits (PERFBOOSTMODE may not be available on all systems)
+    # Detect based on CPU limits
     if ($maxAC.AC -eq 80 -and $minAC.AC -eq 5) { 
         return '1'  # Economy
     }
     
     if ($maxAC.AC -eq 100 -and $minAC.AC -eq 5) { 
-        return '2'  # Eco-Balanced (or any 100% mode)
+        $boost = Get-PowerValue 'sub_processor' 'PERFBOOSTMODE'
+        if ($null -ne $boost.AC -and $boost.AC -eq 0) {
+            return '2'  # Eco-Balanced (boost disabled)
+        }
+        return '3'  # Balanced (boost enabled or default behavior)
     }
     
     # Fallback: if max CPU is 80% or less, assume Economy
@@ -568,26 +572,26 @@ function Detect-CurrentPreset {
         return '1'
     }
     
-    # Default to Eco-Balanced if uncertain
-    return '2'
+    # Default to Balanced if uncertain
+    return '3'
 }
 
 function Switch-EconomyBalanced {
     <#
     .SYNOPSIS
-        Toggle between Economy and Eco-Balanced presets.
+        Toggle between Economy and Balanced presets.
     #>
     
     $current = Detect-CurrentPreset
     
     if ($current -eq '1') {
-        # Currently Economy, switch to Eco-Balanced
-        $target = $PRESETS['2']
-        Write-Host "`n  Switching from Economy to Eco-Balanced..." -ForegroundColor $C.Accent
+        # Currently Economy, switch to Balanced
+        $target = $PRESETS['3']
+        Write-Host "`n  Switching from Economy to Balanced..." -ForegroundColor $C.Accent
     } else {
-        # Currently Eco-Balanced (or other), switch to Economy
+        # Currently Balanced (or other), switch to Economy
         $target = $PRESETS['1']
-        Write-Host "`n  Switching from Eco-Balanced to Economy..." -ForegroundColor $C.Accent
+        Write-Host "`n  Switching from Balanced to Economy..." -ForegroundColor $C.Accent
     }
     
     Apply-Preset -P $target -Silent

@@ -8,9 +8,7 @@ cd /d "%~dp0"
 
 REM Check if -toggle parameter is provided
 if /i "%~1"=="-toggle" (
-    REM Create a flag file to signal toggle mode
-    echo toggle > "%TEMP%\PowerProfile_ToggleMode.flag"
-    powershell.exe -Command "Start-Process powershell.exe -ArgumentList '-ExecutionPolicy Bypass -NoProfile -File \"%~dp0PowerProfile.ps1\"' -Verb RunAs -WindowStyle Hidden"
+    powershell.exe -Command "Start-Process powershell.exe -ArgumentList '-ExecutionPolicy Bypass -NoProfile -File \"%~dp0PowerProfile.ps1\" -Toggle' -Verb RunAs -WindowStyle Hidden"
 ) else (
     powershell.exe -Command "Start-Process powershell.exe -ArgumentList '-ExecutionPolicy Bypass -NoExit -File \"%~dp0PowerProfile.ps1\"' -Verb RunAs"
 )
