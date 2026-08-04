@@ -2,6 +2,7 @@
 
 **Advanced Windows power management with precision control over CPU boost, thermals, and performance.**
 
+<img src="media/Screenshot.png" alt="Power Profile Manager Screenshot" width="700">
 
 ## Installation
 
